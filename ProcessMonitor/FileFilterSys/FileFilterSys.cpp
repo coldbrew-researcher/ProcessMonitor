@@ -8,7 +8,7 @@
 #define SYMLINK_NAME L"\\DosDevices\\FileFilterDriver"
 #define FILE_FILTER_ALTITUDE L"385201"
 #define IOCTL_RECEIVE CTL_CODE(FILE_DEVICE_UNKNOWN, 0x800, METHOD_BUFFERED, FILE_READ_DATA)
-#define MAX_EVENTS 50000
+#define MAX_EVENTS 50000 // Max event can push to list
 #define DbgPrintEx
 
 // Event types
@@ -20,23 +20,18 @@ typedef struct _EVENT_DATA {
     LARGE_INTEGER Timestamp;
     struct {
         HANDLE ProcessId;
-        WCHAR FilePath[260];
-        ACCESS_MASK DesiredAccess; // For CREATE: access mask; for WRITE: write length
+        WCHAR FilePath[260]; // Maximum length
+        ACCESS_MASK DesiredAccess; // Only monitor CREATE/WRITE
     } FileCreate;
 } EVENT_DATA, * PEVENT_DATA;
 
 // Globals
-PDEVICE_OBJECT gDeviceObject = NULL;
-PFLT_FILTER gFilterHandle = NULL;
-KEVENT gEvent;
-LIST_ENTRY gEventList;
-KSPIN_LOCK gSpinLock;
-LONG gEventCount = 0;
-
-// Utility to get current time
-VOID GetFormattedTime(PLARGE_INTEGER Time) {
-    KeQuerySystemTime(Time);
-}
+PDEVICE_OBJECT gDeviceObject = NULL; // for I/O 
+PFLT_FILTER gFilterHandle = NULL; // reg filter
+KEVENT gEvent; // 
+LIST_ENTRY gEventList; // List Event
+KSPIN_LOCK gSpinLock; // protect dât in gEventList
+LONG gEventCount = 0; // count event
 
 // Cleanup resources
 VOID CleanupResources() {
@@ -81,7 +76,6 @@ BOOLEAN QueueEventData(__EVENT_TYPE Type, HANDLE ProcessId, PUNICODE_STRING File
 
     RtlZeroMemory(event, sizeof(EVENT_DATA));
     event->Type = Type;
-    GetFormattedTime(&event->Timestamp);
     event->FileCreate.ProcessId = ProcessId;
     event->FileCreate.DesiredAccess = DesiredAccess;
 
@@ -106,11 +100,7 @@ BOOLEAN QueueEventData(__EVENT_TYPE Type, HANDLE ProcessId, PUNICODE_STRING File
 }
 
 // File I/O callback
-FLT_PREOP_CALLBACK_STATUS FileCreatePreOperation(
-    PFLT_CALLBACK_DATA Data,
-    PCFLT_RELATED_OBJECTS FltObjects,
-    PVOID* CompletionContext
-) {
+FLT_PREOP_CALLBACK_STATUS FileCreatePreOperation(PFLT_CALLBACK_DATA Data, PCFLT_RELATED_OBJECTS FltObjects, PVOID* CompletionContext) {
     UNREFERENCED_PARAMETER(FltObjects);
     UNREFERENCED_PARAMETER(CompletionContext);
 
@@ -119,8 +109,7 @@ FLT_PREOP_CALLBACK_STATUS FileCreatePreOperation(
 
     NTSTATUS status = FltGetFileNameInformation(Data, FLT_FILE_NAME_NORMALIZED | FLT_FILE_NAME_QUERY_ALWAYS_ALLOW_CACHE_LOOKUP, &fileNameInfo);
     if (!NT_SUCCESS(status)) {
-        DbgPrintEx("FileFilter: FltGetFileNameInformation failed for PID %p, Operation %d: 0x%X\n",
-            processId, Data->Iopb->MajorFunction, status);
+        DbgPrintEx("FileFilter: FltGetFileNameInformation failed for PID %p, Operation %d: 0x%X\n", processId, Data->Iopb->MajorFunction, status);
         return FLT_PREOP_SUCCESS_NO_CALLBACK;
     }
 
@@ -132,24 +121,22 @@ FLT_PREOP_CALLBACK_STATUS FileCreatePreOperation(
     }
 
     switch (Data->Iopb->MajorFunction) {
-    case IRP_MJ_CREATE:
+    case IRP_MJ_CREATE: // 0x00
         DbgPrintEx("FileFilter: IRP_MJ_CREATE intercepted (PID: %p, File: %wZ)\n", processId, &fileNameInfo->Name);
         QueueEventData(EVENT_FILE_CREATE, processId, &fileNameInfo->Name, Data->Iopb->Parameters.Create.SecurityContext->DesiredAccess);
         break;
-    case IRP_MJ_WRITE:
-        DbgPrintEx("FileFilter: IRP_MJ_WRITE intercepted (PID: %p, File: %wZ, Length: %lu)\n",
-            processId, &fileNameInfo->Name, Data->Iopb->Parameters.Write.Length);
+    case IRP_MJ_WRITE: // 0x04
+        DbgPrintEx("FileFilter: IRP_MJ_WRITE intercepted (PID: %p, File: %wZ, Length: %lu)\n",processId, &fileNameInfo->Name, Data->Iopb->Parameters.Write.Length);
         QueueEventData(EVENT_FILE_WRITE, processId, &fileNameInfo->Name, Data->Iopb->Parameters.Write.Length);
         break;
     }
-
     FltReleaseFileNameInformation(fileNameInfo);
     return FLT_PREOP_SUCCESS_NO_CALLBACK;
 }
 
 // Minifilter unload routine
 NTSTATUS FilterUnload(FLT_FILTER_UNLOAD_FLAGS Flags) {
-    UNREFERENCED_PARAMETER(Flags);
+    UNREFERENCED_PARAMETER(Flags); // no use Flags
     if (gFilterHandle) {
         FltUnregisterFilter(gFilterHandle);
         gFilterHandle = NULL;
@@ -159,20 +146,19 @@ NTSTATUS FilterUnload(FLT_FILTER_UNLOAD_FLAGS Flags) {
     return STATUS_SUCCESS;
 }
 
-// Minifilter registration
 CONST FLT_OPERATION_REGISTRATION Callbacks[] = {
-    { IRP_MJ_CREATE, 0, FileCreatePreOperation, NULL },
-    { IRP_MJ_WRITE, 0, FileCreatePreOperation, NULL },
+    { IRP_MJ_CREATE, 0, FileCreatePreOperation, NULL }, // Callback when FileCreate
+    { IRP_MJ_WRITE, 0, FileCreatePreOperation, NULL }, // Callback when FileWrite
     { IRP_MJ_OPERATION_END }
 };
 
 CONST FLT_REGISTRATION FilterRegistration = {
-    sizeof(FLT_REGISTRATION),
-    FLT_REGISTRATION_VERSION,
+    sizeof(FLT_REGISTRATION), 
+    FLT_REGISTRATION_VERSION, // Minifilter drivers must set this member to FLT_REGISTRATION_VERSION.
     0,
     NULL,
-    Callbacks,
-    FilterUnload,
+    Callbacks, // callback FLT_OPERATION_REGISTRATION
+    FilterUnload, // FilterUnload
     NULL, NULL, NULL, NULL, NULL, NULL, NULL
 };
 
@@ -244,8 +230,8 @@ extern "C" NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING Reg
     UNICODE_STRING deviceName, symlinkName;
 
     // Initialize globals
-    KeInitializeEvent(&gEvent, SynchronizationEvent, FALSE);
-    InitializeListHead(&gEventList);
+    KeInitializeEvent(&gEvent, SynchronizationEvent, FALSE); // 1 thread cho manager
+    InitializeListHead(&gEventList); 
     KeInitializeSpinLock(&gSpinLock);
 
     // Create device
@@ -257,7 +243,7 @@ extern "C" NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING Reg
     }
 
     // Create symbolic link
-    RtlInitUnicodeString(&symlinkName, SYMLINK_NAME);
+    RtlInitUnicodeString(&symlinkName, SYMLINK_NAME); 
     status = IoCreateSymbolicLink(&symlinkName, &deviceName);
     if (!NT_SUCCESS(status)) {
         DbgPrintEx("FileFilter: Failed to create symbolic link: 0x%X\n", status);
@@ -268,7 +254,7 @@ extern "C" NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING Reg
     // Set dispatch routines
     DriverObject->MajorFunction[IRP_MJ_CREATE] = HandleCreate;
     DriverObject->MajorFunction[IRP_MJ_CLOSE] = HandleClose;
-    DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = DispatchDeviceControl;
+    DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = DispatchDeviceControl; // comunicate
 
     // Register mini-filter
     UNICODE_STRING altitude;

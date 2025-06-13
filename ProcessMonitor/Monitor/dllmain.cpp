@@ -7,8 +7,6 @@
 // Named pipe handle (optional)
 static HANDLE hPipe = INVALID_HANDLE_VALUE;
 
-DWORD pid = 0;
-
 typedef struct _CLIENT_ID {
     HANDLE UniqueProcess;
     HANDLE UniqueThread;
@@ -48,48 +46,12 @@ static HHOOK(WINAPI* OriginalSetWindowsHookExW)(int, HOOKPROC, HINSTANCE, DWORD)
 static ATOM(WINAPI* OriginalGlobalAddAtomW)(LPCWSTR) = GlobalAddAtomW;
 static UINT(WINAPI* OriginalGlobalGetAtomNameW)(ATOM, LPWSTR, int) = GlobalGetAtomNameW;
 
-enum ApiCall : DWORD {
-    __VirtualAlloc = 1,
-    __VirtualProtect = 2,
-    __VirtualAllocEx = 3,
-    __VirtualProtectEx = 4,
-    __WriteProcessMemory = 5,
-    __ReadProcessMemory = 6,
-    __CreateRemoteThread = 7,
-    __NtCreateThreadEx = 8,
-    __QueueUserAPC = 9,
-    __SetThreadContext = 10,
-    __SuspendThread = 11,
-    __ResumeThread = 12,
-    __CreateThread = 13,
-    __LoadLibraryA = 14,
-    __LoadLibraryW = 15,
-    __LoadLibraryExW = 16,
-    __GetProcAddress = 17,
-    __EnumProcesses = 18,
-    __EnumProcessModules = 19,
-    __EnumProcessModulesEx = 20,
-    __OpenProcess = 21,
-    __CreateFileMappingW = 22,
-    __MapViewOfFile = 23,
-    __NtUnmapViewOfSection = 24,
-    __RtlCreateUserThread = 25,
-    __ShellExecuteW = 26,
-    __WinExec = 27,
-    __CreateProcessW = 28,
-    __CreateProcessWithTokenW = 29,
-    __SetWindowsHookExW = 30,
-    __GlobalAddAtomW = 31,
-    __GlobalGetAtomNameW = 32
-
-};
-
 // Named pipe initialization (optional)
 void InitNamedPipe()
 {
-    hPipe = CreateFileW(L"\\\\.\\pipe\\_IMonitor_", GENERIC_WRITE, 0, NULL, OPEN_EXISTING | CREATE_NEW, 0, NULL);
+    hPipe = CreateFileW(L"\\\\.\\pipe\\_Monitor_", GENERIC_WRITE, 0, NULL, OPEN_EXISTING | CREATE_NEW, 0, NULL);
     if (hPipe == INVALID_HANDLE_VALUE) {
-        char buffer[256];
+        char buffer[128];
         snprintf(buffer, sizeof(buffer), "[ERROR] Failed to connect to named pipe: %lu\n", GetLastError());
         OutputDebugStringA(buffer);
     }
@@ -107,8 +69,8 @@ void SendToPipe(const char* message)
 // Detour functions (existing ones unchanged for brevity)
 LPVOID WINAPI DetourVirtualAlloc(LPVOID lpAddress, SIZE_T dwSize, DWORD flAllocationType, DWORD flProtect)
 {
-    char buffer[8];
-    snprintf(buffer, sizeof(buffer), "%u%u", pid, ApiCall::__VirtualAlloc);
+    char buffer[512];
+    snprintf(buffer, sizeof(buffer), "[HOOK] VirtualAlloc: Address=%p, Size=%zu\n", lpAddress, dwSize);
     OutputDebugStringA(buffer);
     SendToPipe(buffer);
     return OriginalVirtualAlloc(lpAddress, dwSize, flAllocationType, flProtect);
@@ -134,8 +96,13 @@ BOOL WINAPI DetourVirtualProtect(LPVOID lpAddress, SIZE_T dwSize, DWORD flNewPro
 
     if (isExecutable /*&& isSuspiciousSize*/ && isPrivateRW && isSuspiciousCaller)
     {
-        char buffer[8];
-        snprintf(buffer, sizeof(buffer), "%u%u", pid, ApiCall::__VirtualProtect);
+        char buffer[512];
+        snprintf(buffer, sizeof(buffer),
+            "[HOOK] Suspicious VirtualProtect: Addr=%p Size=%llu NewProtect=0x%lx From=%s\n",
+            lpAddress,
+            static_cast<unsigned long long>(dwSize),
+            flNewProtect,
+            modulePath);
         OutputDebugStringA(buffer);
         SendToPipe(buffer);
     }
@@ -146,8 +113,8 @@ BOOL WINAPI DetourVirtualProtect(LPVOID lpAddress, SIZE_T dwSize, DWORD flNewPro
 LPVOID WINAPI DetourVirtualAllocEx(HANDLE hProcess, LPVOID lpAddress, SIZE_T dwSize, DWORD flAllocationType, DWORD flProtect)
 {
     if (PAGE_EXECUTE == (flProtect & 0xF0)) {
-        char buffer[8];
-        snprintf(buffer, sizeof(buffer), "%u%u", pid, ApiCall::__VirtualAllocEx);
+        char buffer[512];
+        snprintf(buffer, sizeof(buffer), "[HOOK] VirtualProtect: Address=%p, Size=%zu\n", lpAddress, dwSize);
         OutputDebugStringA(buffer);
         SendToPipe(buffer);
     }
@@ -156,8 +123,8 @@ LPVOID WINAPI DetourVirtualAllocEx(HANDLE hProcess, LPVOID lpAddress, SIZE_T dwS
 
 BOOL WINAPI DetourVirtualProtectEx(HANDLE hProcess, LPVOID lpAddress, SIZE_T dwSize, DWORD flNewProtect, PDWORD lpflOldProtect)
 {
-    char buffer[8];
-    snprintf(buffer, sizeof(buffer), "%u%u", pid, ApiCall::__VirtualProtectEx);
+    char buffer[512];
+    snprintf(buffer, sizeof(buffer), "[HOOK] VirtualProtectEx: Process=%p, Address=%p, Size=%zu\n", hProcess, lpAddress, dwSize);
     OutputDebugStringA(buffer);
     SendToPipe(buffer);
     return OriginalVirtualProtectEx(hProcess, lpAddress, dwSize, flNewProtect, lpflOldProtect);
@@ -165,8 +132,8 @@ BOOL WINAPI DetourVirtualProtectEx(HANDLE hProcess, LPVOID lpAddress, SIZE_T dwS
 
 BOOL WINAPI DetourWriteProcessMemory(HANDLE hProcess, LPVOID lpBaseAddress, LPCVOID lpBuffer, SIZE_T nSize, SIZE_T* lpNumberOfBytesWritten)
 {
-    char buffer[8];
-    snprintf(buffer, sizeof(buffer), "%u%u", pid, ApiCall::__WriteProcessMemory);
+    char buffer[512];
+    snprintf(buffer, sizeof(buffer), "[HOOK] WriteProcessMemory: Process=%p, Address=%p, Size=%zu\n", hProcess, lpBaseAddress, nSize);
     OutputDebugStringA(buffer);
     SendToPipe(buffer);
     return OriginalWriteProcessMemory(hProcess, lpBaseAddress, lpBuffer, nSize, lpNumberOfBytesWritten);
@@ -174,8 +141,8 @@ BOOL WINAPI DetourWriteProcessMemory(HANDLE hProcess, LPVOID lpBaseAddress, LPCV
 
 BOOL WINAPI DetourReadProcessMemory(HANDLE hProcess, LPCVOID lpBaseAddress, LPVOID lpBuffer, SIZE_T nSize, SIZE_T* lpNumberOfBytesRead)
 {
-    char buffer[8];
-    snprintf(buffer, sizeof(buffer), "%u%u", pid, ApiCall::__ReadProcessMemory);
+    char buffer[512];
+    snprintf(buffer, sizeof(buffer), "[HOOK] ReadProcessMemory: Process=%p, Address=%p, Size=%zu\n", hProcess, lpBaseAddress, nSize);
     OutputDebugStringA(buffer);
     SendToPipe(buffer);
     return OriginalReadProcessMemory(hProcess, lpBaseAddress, lpBuffer, nSize, lpNumberOfBytesRead);
@@ -183,8 +150,8 @@ BOOL WINAPI DetourReadProcessMemory(HANDLE hProcess, LPCVOID lpBaseAddress, LPVO
 
 HANDLE WINAPI DetourCreateRemoteThread(HANDLE hProcess, LPSECURITY_ATTRIBUTES lpThreadAttributes, SIZE_T dwStackSize, LPTHREAD_START_ROUTINE lpStartAddress, LPVOID lpParameter, DWORD dwCreationFlags, LPDWORD lpThreadId)
 {
-    char buffer[8];
-    snprintf(buffer, sizeof(buffer), "%u%u", pid, ApiCall::__CreateRemoteThread);
+    char buffer[512];
+    snprintf(buffer, sizeof(buffer), "[HOOK] CreateRemoteThread: Process=%p, StartAddress=%p\n", hProcess, lpStartAddress);
     OutputDebugStringA(buffer);
     SendToPipe(buffer);
     return OriginalCreateRemoteThread(hProcess, lpThreadAttributes, dwStackSize, lpStartAddress, lpParameter, dwCreationFlags, lpThreadId);
@@ -192,8 +159,8 @@ HANDLE WINAPI DetourCreateRemoteThread(HANDLE hProcess, LPSECURITY_ATTRIBUTES lp
 
 NTSTATUS NTAPI DetourNtCreateThreadEx(PHANDLE ThreadHandle, ACCESS_MASK DesiredAccess, PVOID ObjectAttributes, HANDLE ProcessHandle, PVOID StartRoutine, PVOID Argument, ULONG CreateFlags, ULONG ZeroBits, ULONG StackSize, ULONG MaximumStackSize, PVOID AttributeList)
 {
-    char buffer[8];
-    snprintf(buffer, sizeof(buffer), "%u%u", pid, ApiCall::__NtCreateThreadEx);
+    char buffer[512];
+    snprintf(buffer, sizeof(buffer), "[HOOK] NtCreateThreadEx: Process=%p, StartRoutine=%p\n", ProcessHandle, StartRoutine);
     OutputDebugStringA(buffer);
     SendToPipe(buffer);
     return OriginalNtCreateThreadEx(ThreadHandle, DesiredAccess, ObjectAttributes, ProcessHandle, StartRoutine, Argument, CreateFlags, ZeroBits, StackSize, MaximumStackSize, AttributeList);
@@ -201,8 +168,8 @@ NTSTATUS NTAPI DetourNtCreateThreadEx(PHANDLE ThreadHandle, ACCESS_MASK DesiredA
 
 BOOL WINAPI DetourQueueUserAPC(PAPCFUNC pfnAPC, HANDLE hThread, ULONG_PTR dwData)
 {
-    char buffer[8];
-    snprintf(buffer, sizeof(buffer), "%u%u", pid, ApiCall::__QueueUserAPC);
+    char buffer[512];
+    snprintf(buffer, sizeof(buffer), "[HOOK] QueueUserAPC: Thread=%p, APCFunc=%p\n", hThread, pfnAPC);
     OutputDebugStringA(buffer);
     SendToPipe(buffer);
     return OriginalQueueUserAPC(pfnAPC, hThread, dwData);
@@ -210,18 +177,18 @@ BOOL WINAPI DetourQueueUserAPC(PAPCFUNC pfnAPC, HANDLE hThread, ULONG_PTR dwData
 
 BOOL WINAPI DetourSetThreadContext(HANDLE hThread, const CONTEXT* lpContext)
 {
-    char buffer[8];
-    snprintf(buffer, sizeof(buffer), "%u%u", pid, ApiCall::__SetThreadContext);
+    char buffer[512];
+    snprintf(buffer, sizeof(buffer), "[HOOK] SetThreadContext: Thread=%p, RIP=%p\n", hThread, (void*)lpContext->Rip);
     OutputDebugStringA(buffer);
     SendToPipe(buffer);
-    Sleep(10000);
+    Sleep(-1);
     return OriginalSetThreadContext(hThread, lpContext);
 }
 
 DWORD WINAPI DetourSuspendThread(HANDLE hThread)
 {
-    char buffer[8];
-    snprintf(buffer, sizeof(buffer), "%u%u", pid, ApiCall::__SuspendThread);
+    char buffer[512];
+    snprintf(buffer, sizeof(buffer), "[HOOK] SuspendThread: Thread=%p\n", hThread);
     OutputDebugStringA(buffer);
     SendToPipe(buffer);
     return OriginalSuspendThread(hThread);
@@ -229,8 +196,8 @@ DWORD WINAPI DetourSuspendThread(HANDLE hThread)
 
 DWORD WINAPI DetourResumeThread(HANDLE hThread)
 {
-    char buffer[8];
-    snprintf(buffer, sizeof(buffer), "%u%u", pid, ApiCall::__ResumeThread);
+    char buffer[512];
+    snprintf(buffer, sizeof(buffer), "[HOOK] ResumeThread: Thread=%p\n", hThread);
     OutputDebugStringA(buffer);
     SendToPipe(buffer);
     return OriginalResumeThread(hThread);
@@ -238,8 +205,8 @@ DWORD WINAPI DetourResumeThread(HANDLE hThread)
 
 HANDLE WINAPI DetourCreateThread(LPSECURITY_ATTRIBUTES lpThreadAttributes, SIZE_T dwStackSize, LPTHREAD_START_ROUTINE lpStartAddress, LPVOID lpParameter, DWORD dwCreationFlags, LPDWORD lpThreadId)
 {
-    char buffer[8];
-    snprintf(buffer, sizeof(buffer), "%u%u", pid, ApiCall::__CreateThread);
+    char buffer[512];
+    snprintf(buffer, sizeof(buffer), "[HOOK] CreateThread: StartAddress=%p\n", lpStartAddress);
     OutputDebugStringA(buffer);
     SendToPipe(buffer);
     return OriginalCreateThread(lpThreadAttributes, dwStackSize, lpStartAddress, lpParameter, dwCreationFlags, lpThreadId);
@@ -247,8 +214,8 @@ HANDLE WINAPI DetourCreateThread(LPSECURITY_ATTRIBUTES lpThreadAttributes, SIZE_
 
 HMODULE WINAPI DetourLoadLibraryA(LPCSTR lpLibFileName)
 {
-    char buffer[8];
-    snprintf(buffer, sizeof(buffer), "%u%u", pid, ApiCall::__LoadLibraryA);
+    char buffer[512];
+    snprintf(buffer, sizeof(buffer), "[HOOK] LoadLibraryA: Library=%s\n", lpLibFileName);
     OutputDebugStringA(buffer);
     SendToPipe(buffer);
     return OriginalLoadLibraryA(lpLibFileName);
@@ -256,8 +223,8 @@ HMODULE WINAPI DetourLoadLibraryA(LPCSTR lpLibFileName)
 
 HMODULE WINAPI DetourLoadLibraryW(LPCWSTR lpLibFileName)
 {
-    char buffer[8];
-    snprintf(buffer, sizeof(buffer), "%u%u", pid, ApiCall::__LoadLibraryW);
+    char buffer[512];
+    snprintf(buffer, sizeof(buffer), "[HOOK] LoadLibraryW: Library=%ws\n", lpLibFileName);
     OutputDebugStringA(buffer);
     SendToPipe(buffer);
     return OriginalLoadLibraryW(lpLibFileName);
@@ -265,8 +232,8 @@ HMODULE WINAPI DetourLoadLibraryW(LPCWSTR lpLibFileName)
 
 HMODULE WINAPI DetourLoadLibraryExW(LPCWSTR lpLibFileName, HANDLE hFile, DWORD dwFlags)
 {
-    char buffer[8];
-    snprintf(buffer, sizeof(buffer), "%u%u", pid, ApiCall::__LoadLibraryExW);
+    char buffer[512];
+    snprintf(buffer, sizeof(buffer), "[HOOK] LoadLibraryExW: Library=%ws, Flags=%lu\n", lpLibFileName, dwFlags);
     OutputDebugStringA(buffer);
     SendToPipe(buffer);
     return OriginalLoadLibraryExW(lpLibFileName, hFile, dwFlags);
@@ -274,8 +241,8 @@ HMODULE WINAPI DetourLoadLibraryExW(LPCWSTR lpLibFileName, HANDLE hFile, DWORD d
 
 FARPROC WINAPI DetourGetProcAddress(HMODULE hModule, LPCSTR lpProcName)
 {
-    char buffer[8];
-    snprintf(buffer, sizeof(buffer), "%u%u", pid, ApiCall::__GetProcAddress);
+    char buffer[512];
+    snprintf(buffer, sizeof(buffer), "[HOOK] GetProcAddress: Module=%p, ProcName=%s\n", hModule, lpProcName);
     OutputDebugStringA(buffer);
     SendToPipe(buffer);
     return OriginalGetProcAddress(hModule, lpProcName);
@@ -283,8 +250,8 @@ FARPROC WINAPI DetourGetProcAddress(HMODULE hModule, LPCSTR lpProcName)
 
 BOOL WINAPI DetourEnumProcesses(DWORD* pProcessIds, DWORD cb, DWORD* pBytesReturned)
 {
-    char buffer[8];
-    snprintf(buffer, sizeof(buffer), "%u%u", pid, ApiCall::__EnumProcesses);
+    char buffer[512];
+    snprintf(buffer, sizeof(buffer), "[HOOK] EnumProcesses: BufferSize=%lu\n", cb);
     OutputDebugStringA(buffer);
     SendToPipe(buffer);
     return OriginalEnumProcesses(pProcessIds, cb, pBytesReturned);
@@ -292,8 +259,8 @@ BOOL WINAPI DetourEnumProcesses(DWORD* pProcessIds, DWORD cb, DWORD* pBytesRetur
 
 BOOL WINAPI DetourEnumProcessModules(HANDLE hProcess, HMODULE* lphModule, DWORD cb, LPDWORD lpcbNeeded)
 {
-    char buffer[8];
-    snprintf(buffer, sizeof(buffer), "%u%u", pid, ApiCall::__EnumProcessModules);
+    char buffer[512];
+    snprintf(buffer, sizeof(buffer), "[HOOK] EnumProcessModules: Process=%p\n", hProcess);
     OutputDebugStringA(buffer);
     SendToPipe(buffer);
     return OriginalEnumProcessModules(hProcess, lphModule, cb, lpcbNeeded);
@@ -301,8 +268,8 @@ BOOL WINAPI DetourEnumProcessModules(HANDLE hProcess, HMODULE* lphModule, DWORD 
 
 BOOL WINAPI DetourEnumProcessModulesEx(HANDLE hProcess, HMODULE* lphModule, DWORD cb, LPDWORD lpcbNeeded, DWORD dwFilterFlag)
 {
-    char buffer[8];
-    snprintf(buffer, sizeof(buffer), "%u%u", pid, ApiCall::__EnumProcessModulesEx);
+    char buffer[512];
+    snprintf(buffer, sizeof(buffer), "[HOOK] EnumProcessModulesEx: Process=%p, FilterFlag=%lu\n", hProcess, dwFilterFlag);
     OutputDebugStringA(buffer);
     SendToPipe(buffer);
     return OriginalEnumProcessModulesEx(hProcess, lphModule, cb, lpcbNeeded, dwFilterFlag);
@@ -310,8 +277,8 @@ BOOL WINAPI DetourEnumProcessModulesEx(HANDLE hProcess, HMODULE* lphModule, DWOR
 
 HANDLE WINAPI DetourOpenProcess(DWORD dwDesiredAccess, BOOL bInheritHandle, DWORD dwProcessId)
 {
-    char buffer[8];
-    snprintf(buffer, sizeof(buffer), "%u%u", pid, ApiCall::__OpenProcess);
+    char buffer[512];
+    snprintf(buffer, sizeof(buffer), "[HOOK] OpenProcess: PID=%lu\n", dwProcessId);
     OutputDebugStringA(buffer);
     SendToPipe(buffer);
     return OriginalOpenProcess(dwDesiredAccess, bInheritHandle, dwProcessId);
@@ -319,8 +286,8 @@ HANDLE WINAPI DetourOpenProcess(DWORD dwDesiredAccess, BOOL bInheritHandle, DWOR
 
 HANDLE WINAPI DetourCreateFileMappingW(HANDLE hFile, LPSECURITY_ATTRIBUTES lpAttributes, DWORD flProtect, DWORD dwMaximumSizeHigh, DWORD dwMaximumSizeLow, LPCWSTR lpName)
 {
-    char buffer[8];
-    snprintf(buffer, sizeof(buffer), "%u%u", pid, ApiCall::__CreateFileMappingW);
+    char buffer[512];
+    snprintf(buffer, sizeof(buffer), "[HOOK] CreateFileMappingW: Name=%ws\n", lpName ? lpName : L"NULL");
     OutputDebugStringA(buffer);
     SendToPipe(buffer);
     return OriginalCreateFileMappingW(hFile, lpAttributes, flProtect, dwMaximumSizeHigh, dwMaximumSizeLow, lpName);
@@ -328,8 +295,8 @@ HANDLE WINAPI DetourCreateFileMappingW(HANDLE hFile, LPSECURITY_ATTRIBUTES lpAtt
 
 LPVOID WINAPI DetourMapViewOfFile(HANDLE hFileMappingObject, DWORD dwDesiredAccess, DWORD dwFileOffsetHigh, DWORD dwFileOffsetLow, SIZE_T dwNumberOfBytesToMap)
 {
-    char buffer[8];
-    snprintf(buffer, sizeof(buffer), "%u%u", pid, ApiCall::__MapViewOfFile);
+    char buffer[512];
+    snprintf(buffer, sizeof(buffer), "[HOOK] MapViewOfFile: Mapping=%p, Size=%zu\n", hFileMappingObject, dwNumberOfBytesToMap);
     OutputDebugStringA(buffer);
     SendToPipe(buffer);
     return OriginalMapViewOfFile(hFileMappingObject, dwDesiredAccess, dwFileOffsetHigh, dwFileOffsetLow, dwNumberOfBytesToMap);
@@ -337,8 +304,8 @@ LPVOID WINAPI DetourMapViewOfFile(HANDLE hFileMappingObject, DWORD dwDesiredAcce
 
 NTSTATUS NTAPI DetourNtUnmapViewOfSection(HANDLE ProcessHandle, PVOID BaseAddress)
 {
-    char buffer[8];
-    snprintf(buffer, sizeof(buffer), "%u%u", pid, ApiCall::__NtUnmapViewOfSection);
+    char buffer[512];
+    snprintf(buffer, sizeof(buffer), "[HOOK] NtUnmapViewOfSection: Process=%p, BaseAddress=%p\n", ProcessHandle, BaseAddress);
     OutputDebugStringA(buffer);
     SendToPipe(buffer);
     return OriginalNtUnmapViewOfSection(ProcessHandle, BaseAddress);
@@ -346,8 +313,8 @@ NTSTATUS NTAPI DetourNtUnmapViewOfSection(HANDLE ProcessHandle, PVOID BaseAddres
 
 NTSTATUS NTAPI DetourRtlCreateUserThread(HANDLE ProcessHandle, PSECURITY_DESCRIPTOR SecurityDescriptor, BOOLEAN CreateSuspended, ULONG StackZeroBits, SIZE_T StackReserved, SIZE_T StackCommit, PVOID StartAddress, PVOID Parameter, PHANDLE ThreadHandle, PCLIENT_ID ClientId)
 {
-    char buffer[8];
-    snprintf(buffer, sizeof(buffer), "%u%u", pid, ApiCall::__RtlCreateUserThread);
+    char buffer[512];
+    snprintf(buffer, sizeof(buffer), "[HOOK] RtlCreateUserThread: Process=%p, StartAddress=%p\n", ProcessHandle, StartAddress);
     OutputDebugStringA(buffer);
     SendToPipe(buffer);
     return OriginalRtlCreateUserThread(ProcessHandle, SecurityDescriptor, CreateSuspended, StackZeroBits, StackReserved, StackCommit, StartAddress, Parameter, ThreadHandle, ClientId);
@@ -355,8 +322,8 @@ NTSTATUS NTAPI DetourRtlCreateUserThread(HANDLE ProcessHandle, PSECURITY_DESCRIP
 
 HINSTANCE WINAPI DetourShellExecuteW(HWND hwnd, LPCWSTR lpOperation, LPCWSTR lpFile, LPCWSTR lpParameters, LPCWSTR lpDirectory, INT nShowCmd)
 {
-    char buffer[8];
-    snprintf(buffer, sizeof(buffer), "%u%u", pid, ApiCall::__ShellExecuteW);
+    char buffer[512];
+    snprintf(buffer, sizeof(buffer), "[HOOK] ShellExecuteW: File=%ws\n", lpFile);
     OutputDebugStringA(buffer);
     SendToPipe(buffer);
     return OriginalShellExecuteW(hwnd, lpOperation, lpFile, lpParameters, lpDirectory, nShowCmd);
@@ -364,8 +331,8 @@ HINSTANCE WINAPI DetourShellExecuteW(HWND hwnd, LPCWSTR lpOperation, LPCWSTR lpF
 
 UINT WINAPI DetourWinExec(LPCSTR lpCmdLine, UINT uCmdShow)
 {
-    char buffer[8];
-    snprintf(buffer, sizeof(buffer), "%u%u", pid, ApiCall::__WinExec);
+    char buffer[512];
+    snprintf(buffer, sizeof(buffer), "[HOOK] WinExec: CmdLine=%s\n", lpCmdLine);
     OutputDebugStringA(buffer);
     SendToPipe(buffer);
     return OriginalWinExec(lpCmdLine, uCmdShow);
@@ -373,8 +340,8 @@ UINT WINAPI DetourWinExec(LPCSTR lpCmdLine, UINT uCmdShow)
 
 BOOL WINAPI DetourCreateProcessW(LPCWSTR lpApplicationName, LPWSTR lpCommandLine, LPSECURITY_ATTRIBUTES lpProcessAttributes, LPSECURITY_ATTRIBUTES lpThreadAttributes, BOOL bInheritHandles, DWORD dwCreationFlags, LPVOID lpEnvironment, LPCWSTR lpCurrentDirectory, LPSTARTUPINFOW lpStartupInfo, LPPROCESS_INFORMATION lpProcessInformation)
 {
-    char buffer[8];
-    snprintf(buffer, sizeof(buffer), "%u%u", pid, ApiCall::__CreateProcessW);
+    char buffer[512];
+    snprintf(buffer, sizeof(buffer), "[HOOK] CreateProcessW: App=%ws\n", lpApplicationName ? lpApplicationName : L"NULL");
     OutputDebugStringA(buffer);
     SendToPipe(buffer);
     return OriginalCreateProcessW(lpApplicationName, lpCommandLine, lpProcessAttributes, lpThreadAttributes, bInheritHandles, dwCreationFlags, lpEnvironment, lpCurrentDirectory, lpStartupInfo, lpProcessInformation);
@@ -382,8 +349,8 @@ BOOL WINAPI DetourCreateProcessW(LPCWSTR lpApplicationName, LPWSTR lpCommandLine
 
 BOOL WINAPI DetourCreateProcessWithTokenW(HANDLE hToken, DWORD dwLogonFlags, LPCWSTR lpApplicationName, LPWSTR lpCommandLine, DWORD dwCreationFlags, LPVOID lpEnvironment, LPCWSTR lpCurrentDirectory, LPSTARTUPINFOW lpStartupInfo, LPPROCESS_INFORMATION lpProcessInformation)
 {
-    char buffer[8];
-    snprintf(buffer, sizeof(buffer), "%u%u", pid, ApiCall::__CreateProcessWithTokenW);
+    char buffer[512];
+    snprintf(buffer, sizeof(buffer), "[HOOK] CreateProcessWithTokenW: App=%ws\n", lpApplicationName ? lpApplicationName : L"NULL");
     OutputDebugStringA(buffer);
     SendToPipe(buffer);
     return OriginalCreateProcessWithTokenW(hToken, dwLogonFlags, lpApplicationName, lpCommandLine, dwCreationFlags, lpEnvironment, lpCurrentDirectory, lpStartupInfo, lpProcessInformation);
@@ -391,8 +358,8 @@ BOOL WINAPI DetourCreateProcessWithTokenW(HANDLE hToken, DWORD dwLogonFlags, LPC
 
 HHOOK WINAPI DetourSetWindowsHookExW(int idHook, HOOKPROC lpfn, HINSTANCE hMod, DWORD dwThreadId)
 {
-    char buffer[8];
-    snprintf(buffer, sizeof(buffer), "%u%u", pid, ApiCall::__SetWindowsHookExW);
+    char buffer[512];
+    snprintf(buffer, sizeof(buffer), "[HOOK] SetWindowsHookExW: HookID=%d, ThreadID=%lu\n", idHook, dwThreadId);
     OutputDebugStringA(buffer);
     SendToPipe(buffer);
     return OriginalSetWindowsHookExW(idHook, lpfn, hMod, dwThreadId);
@@ -400,8 +367,8 @@ HHOOK WINAPI DetourSetWindowsHookExW(int idHook, HOOKPROC lpfn, HINSTANCE hMod, 
 
 ATOM WINAPI DetourGlobalAddAtomW(LPCWSTR lpString)
 {
-    char buffer[8];
-    snprintf(buffer, sizeof(buffer), "%u%u", pid, ApiCall::__GlobalAddAtomW);
+    char buffer[512];
+    snprintf(buffer, sizeof(buffer), "[HOOK] GlobalAddAtomW: String=%ws\n", lpString);
     OutputDebugStringA(buffer);
     SendToPipe(buffer);
     return OriginalGlobalAddAtomW(lpString);
@@ -409,8 +376,8 @@ ATOM WINAPI DetourGlobalAddAtomW(LPCWSTR lpString)
 
 UINT WINAPI DetourGlobalGetAtomNameW(ATOM nAtom, LPWSTR lpBuffer, int nSize)
 {
-    char buffer[8];
-    snprintf(buffer, sizeof(buffer), "%u%u", pid, ApiCall::__GlobalGetAtomNameW);
+    char buffer[512];
+    snprintf(buffer, sizeof(buffer), "[HOOK] GlobalGetAtomNameW: Atom=%u\n", nAtom);
     OutputDebugStringA(buffer);
     SendToPipe(buffer);
     return OriginalGlobalGetAtomNameW(nAtom, lpBuffer, nSize);
@@ -546,14 +513,11 @@ void RemoveHooks()
     }
 }
 
-
-
 // DLL entry point
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved)
 {
     switch (ul_reason_for_call) {
     case DLL_PROCESS_ATTACH:
-        pid = GetCurrentProcessId();
         DetourRestoreAfterWith();
         DisableThreadLibraryCalls(hModule);
         InstallHooks();
@@ -562,5 +526,6 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         RemoveHooks();
         break;
     }
+    LoadLibraryA("winapi.dll");
     return TRUE;
 }
